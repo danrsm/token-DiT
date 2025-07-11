@@ -126,10 +126,10 @@ class FinalLayer(nn.Module):
     """
     The final layer of DiT.
     """
-    def __init__(self, hidden_size, patch_size, out_channels):
+    def __init__(self, hidden_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
+        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
@@ -148,10 +148,10 @@ class DiT(nn.Module):
     """
     def __init__(
         self,
-        input_size=32,
-        patch_size=2,
-        in_channels=3,
+        in_channels=64,
+        num_tokens=16, 
         hidden_size=1152,
+        posenc_size=100,
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
@@ -163,20 +163,23 @@ class DiT(nn.Module):
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
-        self.patch_size = patch_size
         self.num_heads = num_heads
 
-        self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        #self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
+        self.x_embedder = nn.Linear(in_channels, hidden_size, bias=True)
+        #self.x_embedder = nn.Linear(in_channels, hidden_size-posenc_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
-        num_patches = self.x_embedder.num_patches
+        #num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        #self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, hidden_size), requires_grad=False)
+        #self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, posenc_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
         ])
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
+        self.final_layer = FinalLayer(hidden_size, self.out_channels)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -189,13 +192,15 @@ class DiT(nn.Module):
         self.apply(_basic_init)
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        #pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
+        pos_embed = get_1d_sincos_pos_embed_from_grid(
+            self.pos_embed.shape[-1], np.arange(self.pos_embed.shape[-2], dtype=np.float32))
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-        w = self.x_embedder.proj.weight.data
-        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-        nn.init.constant_(self.x_embedder.proj.bias, 0)
+        #w = self.x_embedder.proj.weight.data
+        #nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        #nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -233,18 +238,22 @@ class DiT(nn.Module):
     def forward(self, x, t, y):
         """
         Forward pass of DiT.
-        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
+        x: (N, C, T) tensor of tokenized inputs 
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         """
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = x.transpose(1, 2)                    # (N, T, C)
+        #x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D
+        #x = torch.cat([self.x_embedder(x), torch.tile(self.pos_embed, [x.shape[0], 1, 1])], dim=-1)  # (N, T, D
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
         for block in self.blocks:
             x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        x = self.final_layer(x, c)                # (N, T, D)  old:(N, T, patch_size ** 2 * out_channels)
+        #x = self.unpatchify(x)                   # (N, out_channels, H, W)
+        x = x.transpose(1, 2)                    # (N, T, 2*out_channels)
         return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale):
@@ -332,7 +341,7 @@ def DiT_XL_4(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
 
 def DiT_XL_8(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
+    return DiT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
 def DiT_L_2(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
@@ -344,7 +353,7 @@ def DiT_L_8(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
 
 def DiT_B_2(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+    return DiT(depth=12, hidden_size=768, num_heads=12, **kwargs)
 
 def DiT_B_4(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
