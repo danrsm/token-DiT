@@ -175,7 +175,7 @@ def main(args):
         shuffle_idx = torch.randperm(dataset.shape[0])
         ctr = 0
         while ctr + args.global_batch_size < dataset.shape[0]:
-            x = torch.from_numpy(dataset[shuffle_idx[ctr:ctr+args.global_batch_size]]).to(device).transpose(1, 2)*args.normalization
+            x = torch.from_numpy(dataset[shuffle_idx[ctr:ctr+args.global_batch_size]]).to(device)*args.normalization
             y = torch.zeros(args.global_batch_size, dtype=torch.long, device=device)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
             ctr = ctr + args.global_batch_size

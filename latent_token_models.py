@@ -157,7 +157,7 @@ class DiT(nn.Module):
         mlp_ratio=4.0,
         class_dropout_prob=0.1,
         num_classes=1000,
-        learn_sigma=True,
+        learn_sigma=False,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -235,44 +235,18 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t):
         """
         Forward pass of DiT.
-        x: (N, C, T) tensor of tokenized inputs 
+        x: (N, T, C) tensor of tokenized inputs 
         t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of class labels
         """
-        x = x.transpose(1, 2)                    # (N, T, C)
-        #x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D
-        #x = torch.cat([self.x_embedder(x), torch.tile(self.pos_embed, [x.shape[0], 1, 1])], dim=-1)  # (N, T, D
+        x = self.x_embedder(x) + self.pos_embed  # (N, T, D)
         t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
         for block in self.blocks:
-            x = block(x, c)                      # (N, T, D)
-        x = self.final_layer(x, c)                # (N, T, D)  old:(N, T, patch_size ** 2 * out_channels)
-        #x = self.unpatchify(x)                   # (N, out_channels, H, W)
-        x = x.transpose(1, 2)                    # (N, T, 2*out_channels)
+            x = block(x, t)              
+        x = self.final_layer(x, t)
         return x
-
-    def forward_with_cfg(self, x, t, y, cfg_scale):
-        """
-        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
-        """
-        # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
-        half = x[: len(x) // 2]
-        combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
-        # For exact reproducibility reasons, we apply classifier-free guidance on only
-        # three channels by default. The standard approach to cfg applies it to all channels.
-        # This can be done by uncommenting the following line and commenting-out the line following that.
-        # eps, rest = model_out[:, :self.in_channels], model_out[:, self.in_channels:]
-        eps, rest = model_out[:, :3], model_out[:, 3:]
-        cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
-        half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
-        eps = torch.cat([half_eps, half_eps], dim=0)
-        return torch.cat([eps, rest], dim=1)
 
 
 #################################################################################
@@ -334,46 +308,21 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                                   DiT Configs                                  #
 #################################################################################
 
-def DiT_XL_2(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
-
-def DiT_XL_4(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_XL_8(**kwargs):
+def DiT_XL(**kwargs):
     return DiT(depth=28, hidden_size=1152, num_heads=16, **kwargs)
 
-def DiT_L_2(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+def DiT_L(**kwargs):
+    return DiT(depth=24, hidden_size=1024, num_heads=16, **kwargs)
 
-def DiT_L_4(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_L_8(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
-
-def DiT_B_2(**kwargs):
+def DiT_B(**kwargs):
     return DiT(depth=12, hidden_size=768, num_heads=12, **kwargs)
 
-def DiT_B_4(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
-
-def DiT_B_8(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
-
-def DiT_S_2(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
-
-def DiT_S_4(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
-
-def DiT_S_8(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
-
+def DiT_S(**kwargs):
+    return DiT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
 DiT_models = {
-    'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
-    'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
-    'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
-    'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
+    'DiT-XL': DiT_XL,
+    'DiT-L':  DiT_L,
+    'DiT-B':  DiT_B,
+    'DiT-S':  DiT_S,
 }
