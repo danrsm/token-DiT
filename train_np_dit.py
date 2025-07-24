@@ -128,9 +128,10 @@ def main(args):
     # Setup an experiment folder:
     if rank == 0:
         os.makedirs(args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
-        experiment_index = len(glob(f"{args.results_dir}/*"))
+        experiment_index = len(glob(f"{args.results_dir}/{args.expname}*"))
+        experiment_index_str = f"{experiment_index:03d}"  if experiment_index > 0 else ""
         model_string_name = args.model.replace("/", "-")  # e.g., DiT-XL/2 --> DiT-XL-2 (for naming folders)
-        experiment_dir = f"{args.results_dir}/{args.expname}{experiment_index:03d}-{model_string_name}"  # Create an experiment folder
+        experiment_dir = f"{args.results_dir}/{args.expname}{experiment_index_str}-{model_string_name}"  # Create an experiment folder
         checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
         os.makedirs(checkpoint_dir, exist_ok=True)
         logger = create_logger(experiment_dir)
@@ -244,7 +245,7 @@ def main(args):
                     logger.info(f"Saving DiT samples at step {train_steps}...")
                     z = torch.randn(16, args.image_size**2, args.num_channels, device=device)
                     samples = diffusion.p_sample_loop(
-                       model.forward, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device)
+                       model.forward, z.shape, z, clip_denoised=True, model_kwargs=model_kwargs, progress=True, device=device)
                     np.savez(f"{experiment_dir}/samples_{train_steps:07d}.npz", samples=samples.cpu().numpy())
                 
             # Save DiT checkpoint:
@@ -278,7 +279,7 @@ if __name__ == "__main__":
     parser.add_argument("--image-size", type=int, choices=[32, 64, 128], default=32)
     parser.add_argument("--num-channels", type=int, choices=[3, 1], default=3)
     parser.add_argument("--num-classes", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--global-batch-size", type=int, default=256)
     parser.add_argument("--global-seed", type=int, default=0)
     # parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
