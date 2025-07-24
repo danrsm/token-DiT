@@ -148,7 +148,7 @@ def main(args):
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     model = DDP(model.to(device), device_ids=[rank], find_unused_parameters=True)
-    diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
+    diffusion = create_diffusion(timestep_respacing="", flow_matching=args.flow_matching)  # default: 1000 steps, linear noise schedule
     # vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
@@ -179,6 +179,7 @@ def main(args):
         pin_memory=True,
         drop_last=True
     )
+    pixel_idx = torch.arange(args.image_size**2, device=device)  # Used to create coordinates for images
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
 
     # Prepare models for training:
@@ -195,11 +196,21 @@ def main(args):
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
         logger.info(f"Beginning epoch {epoch}...")
-        for x, _ in loader:
-            x = x.to(device).reshape(args.global_batch_size, args.num_channels, args.image_size*args.image_size).transpose(1, 2)
-            #y = y.to(device)
+        for img, _ in loader:
+            x1, x2 = pixel_idx//args.image_size, pixel_idx%args.image_size
+            pos = torch.stack([2*x1.float()/(args.image_size-1) - 1, 
+                             2*x2.float()/(args.image_size-1) - 1], -1).to(img.device)[None].repeat(args.global_batch_size, 1, 1)
+            x = img.to(device).reshape(args.global_batch_size, args.num_channels, args.image_size*args.image_size).transpose(1, 2)
             t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-            model_kwargs = dict()
+            # half image training
+            # model_kwargs = dict(pos=pos, ctx_pos=pos[:, :pos.shape[1]//2], ctx_x=x[:, :pos.shape[1]//2]) 
+            # set context as random set of pixels (different for each sample in batch)
+            ctx_size = torch.randint(low=3, high=args.image_size**2-3, size=[1]).item()
+            idxs = torch.cuda.FloatTensor(args.global_batch_size, args.image_size**2).uniform_().argsort(-1)[...,:ctx_size].to(img.device)
+            # get the relevan coordinates and values of the random idxs
+            ctx_pos = pos[torch.arange(args.global_batch_size).unsqueeze(1), idxs]
+            ctx_x = x[torch.arange(args.global_batch_size).unsqueeze(1), idxs]
+            model_kwargs = dict(pos=pos, ctx_pos=ctx_pos, ctx_x=ctx_x)
             loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             loss = loss_dict["loss"].mean()
             opt.zero_grad()
@@ -228,7 +239,7 @@ def main(args):
 
 
             # Save DiT samples:
-            if train_steps % args.sample_every == 0 and train_steps > 0:
+            if args.sample_every > 0 and train_steps % args.sample_every == 0 and train_steps > 0:
                 if rank == 0:
                     logger.info(f"Saving DiT samples at step {train_steps}...")
                     z = torch.randn(16, args.image_size**2, args.num_channels, device=device)
@@ -237,7 +248,7 @@ def main(args):
                     np.savez(f"{experiment_dir}/samples_{train_steps:07d}.npz", samples=samples.cpu().numpy())
                 
             # Save DiT checkpoint:
-            if train_steps % args.ckpt_every == 0 and train_steps > 0:
+            if train_steps == args.ckpt_every//10 or train_steps == args.ckpt_every//6  or train_steps == args.ckpt_every//2 or (train_steps % args.ckpt_every == 0 and train_steps > 0):
                 if rank == 0:
                     checkpoint = {
                         "model": model.module.state_dict(),
@@ -262,6 +273,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-path", type=str, required=True)
     parser.add_argument("--results-dir", type=str, default="results")
+    parser.add_argument("--flow-matching", type=bool, default=False, help="Use velocity prediction.")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-B")
     parser.add_argument("--image-size", type=int, choices=[32, 64, 128], default=32)
     parser.add_argument("--num-channels", type=int, choices=[3, 1], default=3)
@@ -271,8 +283,8 @@ if __name__ == "__main__":
     parser.add_argument("--global-seed", type=int, default=0)
     # parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="ema")  # Choice doesn't affect training
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--log-every", type=int, default=500)
-    parser.add_argument("--sample-every", type=int, default=10000)
+    parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--sample-every", type=int, default=-1)
     parser.add_argument("--ckpt-every", type=int, default=10000)
     parser.add_argument("--expname", type=str, default="")
     args = parser.parse_args()

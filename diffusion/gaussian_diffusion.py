@@ -28,6 +28,9 @@ class ModelMeanType(enum.Enum):
     PREVIOUS_X = enum.auto()  # the model predicts x_{t-1}
     START_X = enum.auto()  # the model predicts x_0
     EPSILON = enum.auto()  # the model predicts epsilon
+    VELOCITY = enum.auto()  # the model predicts the flow velocity
+
+
 
 
 class ModelVarType(enum.Enum):
@@ -224,10 +227,14 @@ class GaussianDiffusion:
         if noise is None:
             noise = th.randn_like(x_start)
         assert noise.shape == x_start.shape
-        return (
-            _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
-            + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
+        if self.model_mean_type == ModelMeanType.VELOCITY:
+            tt = t.unsqueeze(-1).unsqueeze(-1) / self.num_timesteps
+            return x_start * (1.0 - tt) + noise * tt
+        else:
+            return (
+             _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
+              + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
+            )
 
     def q_posterior_mean_variance(self, x_start, x_t, t):
         """
@@ -316,6 +323,11 @@ class GaussianDiffusion:
 
         if self.model_mean_type == ModelMeanType.START_X:
             pred_xstart = process_xstart(model_output)
+        elif self.model_mean_type == ModelMeanType.VELOCITY:
+            pred_xstart = process_xstart(
+                self._predict_xstart_from_velocity(x_t=x, t=t, velocity=model_output)
+            )
+            model_variance = th.zeros_like(model_variance)
         else:
             pred_xstart = process_xstart(
                 self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output)
@@ -343,6 +355,10 @@ class GaussianDiffusion:
             _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart
         ) / _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
 
+    def _predict_xstart_from_velocity(self, x_t, t, velocity):
+        assert x_t.shape == velocity.shape
+        return (x_t + (t.unsqueeze(-1).unsqueeze(-1)/self.num_timesteps) * velocity)
+    
     def condition_mean(self, cond_fn, p_mean_var, x, t, model_kwargs=None):
         """
         Compute the mean for the previous step, given a function cond_fn that
@@ -767,16 +783,17 @@ class GaussianDiffusion:
                     # Divide by 1000 for equivalence with initial implementation.
                     # Without a factor of 1/1000, the VB term hurts the MSE term.
                     terms["vb"] *= self.num_timesteps / 1000.0
-
             target = {
                 ModelMeanType.PREVIOUS_X: self.q_posterior_mean_variance(
                     x_start=x_start, x_t=x_t, t=t
                 )[0],
                 ModelMeanType.START_X: x_start,
                 ModelMeanType.EPSILON: noise,
+                ModelMeanType.VELOCITY: (x_start - noise),
             }[self.model_mean_type]
             assert model_output.shape == target.shape == x_start.shape
             terms["mse"] = mean_flat((target - model_output) ** 2)
+            #print(ModelMeanType, tt)
             if "vb" in terms:
                 terms["loss"] = terms["mse"] + terms["vb"]
             else:

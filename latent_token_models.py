@@ -249,10 +249,114 @@ class DiT(nn.Module):
         return x
 
 
+
+class NP_DiT(nn.Module):
+    """
+    Diffusion model with a Transformer backbone.
+    """
+    def __init__(
+        self,
+        in_channels=64,
+        num_tokens=16, 
+        hidden_size=1152,
+        posenc_size=100,
+        depth=28,
+        num_heads=16,
+        mlp_ratio=4.0,
+        class_dropout_prob=0.1,
+        num_classes=1000,
+        learn_sigma=False,
+    ):
+        super().__init__()
+        self.learn_sigma = learn_sigma
+        self.in_channels = in_channels
+        self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.num_heads = num_heads
+        self.posenc_size = posenc_size
+
+        print('init2', self.posenc_size, hidden_size)
+        self.h_embedder = nn.Linear(in_channels+2*posenc_size, hidden_size, bias=True)
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        
+        self.blocks = nn.ModuleList([
+            DiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)
+        ])
+        self.final_layer = FinalLayer(hidden_size, self.out_channels)
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.apply(_basic_init)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in DiT blocks:
+        for block in self.blocks:
+            nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    
+    def forward(self, x, t, pos, ctx_pos, ctx_x):
+        """
+        Forward pass of DiT.
+        x: (N, T1, C) tensor of tokenized target coordinates
+        y: (N, T1, C) tensor of tokenized target values (usually noisy)
+        ctx_x: (N, T2, C) tensor of tokenized context coordinates
+        ctx_y: (N, T2, C) tensor of tokenized context values 
+        t: (N,) tensor of diffusion timesteps
+        """
+        posenc_tgt = get_pos_enc(self.posenc_size, pos)
+        posenc_ctx = get_pos_enc(self.posenc_size, ctx_pos)
+        h = torch.cat((torch.cat([posenc_tgt, x], dim=2), 
+                       torch.cat([posenc_ctx, ctx_x], dim=2)), dim=1)
+        h = self.h_embedder(h)  # (N, T, D)
+        t = self.t_embedder(t)    # (N, D)
+        for block in self.blocks:
+            h = block(h, t)              
+        y = self.final_layer(h, t)[:, :x.shape[1]]
+        return y
+
+
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
 #################################################################################
 # https://github.com/facebookresearch/mae/blob/main/util/pos_embed.py
+
+def get_pos_enc(pos_dim, pos):
+    """
+    pos_dim: output dimension for each position
+    pos: a list of positions to be encoded: size (M,)
+    out: (M, D)
+    """
+    assert pos_dim % 2 == 0
+    posshape = pos.shape
+    pos_dim = torch.tensor(pos_dim, dtype=torch.int64).to(pos.device)
+    omega = torch.arange(pos_dim // 2).to(pos.device)#, dtype=np.float64)
+    omega = 2.* omega / pos_dim
+    omega = 1. / 10000**omega  # (D/2,)
+
+    pos = pos.reshape(-1)  # (M,)
+    out = torch.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+    emb_sin = torch.sin(out) # (M, D/2)
+    emb_cos = torch.cos(out) # (M, D/2)
+    emb = torch.cat([emb_sin, emb_cos], axis=-1)  # (M, D)
+
+    return torch.reshape(emb, (posshape[0], posshape[1], 2*pos_dim))
+
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
     """
@@ -320,9 +424,13 @@ def DiT_B(**kwargs):
 def DiT_S(**kwargs):
     return DiT(depth=12, hidden_size=384, num_heads=6, **kwargs)
 
+def NPDiT_S(**kwargs):
+    return NP_DiT(depth=12, hidden_size=384, num_heads=6, **kwargs)
+
 DiT_models = {
     'DiT-XL': DiT_XL,
     'DiT-L':  DiT_L,
     'DiT-B':  DiT_B,
     'DiT-S':  DiT_S,
+    'NPDiT-S': NPDiT_S,
 }
